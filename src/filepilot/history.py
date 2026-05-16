@@ -95,7 +95,18 @@ def pop_last_operation() -> Operation | None:
 
     raw_operation = history.pop()
     _write_history(history)
+    return _operation_from_dict(raw_operation)
 
+
+def peek_last_operation() -> Operation | None:
+    history = _read_history()
+    if not history:
+        return None
+
+    return _operation_from_dict(history[-1])
+
+
+def _operation_from_dict(raw_operation: dict[str, Any]) -> Operation:
     moves = [
         MoveRecord(original=move["original"], organized=move["organized"])
         for move in raw_operation.get("moves", [])

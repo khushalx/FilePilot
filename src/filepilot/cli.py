@@ -5,26 +5,23 @@ from __future__ import annotations
 from pathlib import Path
 
 import typer
-from rich.console import Console
 from rich.markup import escape
-from rich.table import Table
-from rich.text import Text
 
-from . import __version__
+from . import __version__, ui
 from .core import organize_folder, plan_organize, scan_folder, undo_last_operation
-from .history import get_history_file
-from .rules import CATEGORY_ORDER, CATEGORY_RULES
+from .history import get_history_file, peek_last_operation
 
 app = typer.Typer(
     help="Safely organize and rename messy folders.",
     no_args_is_help=True,
 )
-console = Console()
+console = ui.console
 
 
 def version_callback(value: bool) -> None:
     if value:
-        console.print(f"FilePilot {__version__}")
+        ui.print_header("Version")
+        console.print(f"[bold]FilePilot {__version__}[/bold]")
         raise typer.Exit()
 
 
@@ -43,10 +40,12 @@ def main(
 
 def _folder_argument(folder: Path) -> Path:
     if not folder.exists():
-        console.print(f"[red]Folder does not exist:[/red] {escape(str(folder))}")
+        ui.print_header("Path Check")
+        ui.print_error(f"Folder does not exist: {escape(str(folder))}")
         raise typer.Exit(code=1)
     if not folder.is_dir():
-        console.print(f"[red]Path is not a folder:[/red] {escape(str(folder))}")
+        ui.print_header("Path Check")
+        ui.print_error(f"Path is not a folder: {escape(str(folder))}")
         raise typer.Exit(code=1)
     return folder.resolve()
 
@@ -55,17 +54,18 @@ def _folder_argument(folder: Path) -> Path:
 def scan(folder: Path = typer.Argument(..., help="Folder to scan.")) -> None:
     """Scan a folder and summarize file categories."""
     target = _folder_argument(folder)
+    ui.print_header("Scan", target)
+
     result = scan_folder(target)
+    if not result.files:
+        ui.print_empty_state(
+            "Nothing To Scan",
+            "This folder has no direct child files. FilePilot is ready when files arrive.",
+        )
+        return
 
-    table = Table(title=Text(f"FilePilot scan: {target}"))
-    table.add_column("Category", style="cyan", no_wrap=True)
-    table.add_column("Files", justify="right", style="green")
-
-    for category in CATEGORY_ORDER:
-        table.add_row(category, str(result.counts[category]))
-
-    console.print(table)
-    console.print(f"[bold]Total files:[/bold] {len(result.files)}")
+    ui.print_scan_summary(result)
+    ui.print_category_table(result.counts)
 
 
 @app.command()
@@ -79,89 +79,110 @@ def organize(
 ) -> None:
     """Organize files into category folders with safe cleaned names."""
     target = _folder_argument(folder)
+    ui.print_header("Dry Run" if dry_run else "Organize", target)
 
-    if dry_run:
-        planned = plan_organize(target)
-        _print_moves(planned, title=f"Dry run: {target}")
-        console.print("[yellow]No files were moved.[/yellow]")
+    planned = plan_organize(target)
+    if not planned:
+        ui.print_empty_state(
+            "Nothing To Organize",
+            "This folder has no direct child files to move. No changes were made.",
+        )
         return
 
+    if dry_run:
+        ui.print_dry_run_intro()
+        ui.print_move_preview(planned)
+        ui.print_dry_run_summary(planned)
+        return
+
+    folders_created = len(ui.folders_needed(planned))
+    conflicts_handled = ui.conflict_safe_renames(planned)
+    ui.print_safety_check()
+
+    progress = ui.make_progress("Organizing files")
     try:
-        planned, operation = organize_folder(target)
+        with progress:
+            task_id = progress.add_task("organize", total=len(planned))
+
+            def advance(_move) -> None:
+                progress.advance(task_id)
+
+            _planned, operation = organize_folder(target, progress_callback=advance)
     except OSError as error:
-        console.print(
-            "[red]Could not prepare undo history, so no files were moved:[/red] "
+        ui.print_error(
+            "Could not prepare undo history, so no files were moved: "
             f"{escape(str(error))}"
         )
         raise typer.Exit(code=1) from error
-    _print_moves(planned, title=f"Organized: {target}")
-    if operation is None:
-        console.print("[yellow]No files found to organize.[/yellow]")
-    else:
-        console.print("[green]Saved undo history:[/green] ", end="")
-        console.print(Text(str(get_history_file())), end="")
-        console.print(f" ([bold]{len(operation.moves)}[/bold] moves)")
 
-
-def _print_moves(moves, title: str) -> None:
-    table = Table(title=Text(title))
-    table.add_column("Category", style="cyan", no_wrap=True)
-    table.add_column("Old file", overflow="fold")
-    table.add_column("New location", style="green", overflow="fold")
-
-    for move in moves:
-        table.add_row(
-            move.category,
-            Text(move.source.name),
-            Text(str(move.destination.relative_to(move.source.parent))),
-        )
-
-    console.print(table)
-    console.print(f"[bold]Planned moves:[/bold] {len(moves)}")
+    ui.print_cleanup_complete(
+        files_organized=len(operation.moves) if operation is not None else 0,
+        folders_created=folders_created,
+        conflicts_handled=conflicts_handled,
+        undo_available=operation is not None,
+    )
+    ui.print_move_preview(_planned, title="Organized Files")
 
 
 @app.command()
 def undo() -> None:
     """Undo the last organize operation."""
-    try:
-        operation, restored = undo_last_operation()
-    except OSError as error:
-        console.print(f"[red]Undo failed:[/red] {escape(str(error))}")
-        raise typer.Exit(code=1) from error
-    if operation is None:
-        console.print("[yellow]No organize history found.[/yellow]")
+    ui.print_header("Undo")
+    operation_preview = peek_last_operation()
+    if operation_preview is None:
+        ui.print_empty_state(
+            "No Undo History",
+            f"No organize history was found at {get_history_file()}.",
+        )
         return
 
-    table = Table(title=Text(f"Undo: {operation.created_at}"))
-    table.add_column("Moved from", style="cyan", overflow="fold")
-    table.add_column("Restored to", style="green", overflow="fold")
+    ui.print_restore_mode()
+    progress = ui.make_progress("Restoring files")
+    try:
+        with progress:
+            task_id = progress.add_task("restore", total=len(operation_preview.moves))
 
-    for move in restored:
-        table.add_row(Text(move.organized), Text(move.original))
+            def advance(_move, _restored) -> None:
+                progress.advance(task_id)
 
-    console.print(table)
-    console.print(f"[green]Restored files:[/green] {len(restored)}")
+            operation, restored = undo_last_operation(progress_callback=advance)
+    except OSError as error:
+        ui.print_error(f"Undo failed: {escape(str(error))}")
+        raise typer.Exit(code=1) from error
+
+    if operation is None:
+        ui.print_empty_state(
+            "No Undo History",
+            f"No organize history was found at {get_history_file()}.",
+        )
+        return
+
+    original_by_organized = {move.organized: move.original for move in operation.moves}
+    conflicts_handled = sum(
+        1
+        for move in restored
+        if move.original != original_by_organized.get(move.organized, move.original)
+    )
+    ui.print_restore_table(restored)
+    ui.print_restore_summary(
+        files_restored=len(restored),
+        conflicts_handled=conflicts_handled,
+        history_updated=True,
+    )
     skipped = len(operation.moves) - len(restored)
     if skipped:
-        console.print(
-            f"[yellow]Skipped {skipped} missing files that were no longer present.[/yellow]"
+        ui.print_empty_state(
+            "Missing Files Skipped",
+            f"{skipped} file(s) were no longer present, so FilePilot left them untouched.",
         )
 
 
 @app.command("config")
 def show_config() -> None:
     """Show category rules and supported extensions."""
-    table = Table(title="FilePilot category rules")
-    table.add_column("Category", style="cyan", no_wrap=True)
-    table.add_column("Extensions", overflow="fold")
-
-    for category in CATEGORY_ORDER:
-        extensions = sorted(CATEGORY_RULES[category])
-        table.add_row(category, ", ".join(extensions) if extensions else "fallback")
-
-    console.print(table)
-    console.print("[bold]History file:[/bold] ", end="")
-    console.print(Text(str(get_history_file())))
+    ui.print_header("Config")
+    ui.print_config_table()
+    ui.print_history_location(get_history_file())
 
 
 if __name__ == "__main__":

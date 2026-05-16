@@ -6,6 +6,7 @@ import shutil
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
+from typing import Callable
 
 from .history import (
     MoveRecord,
@@ -66,7 +67,10 @@ def plan_organize(folder: Path) -> list[PlannedMove]:
     return planned
 
 
-def organize_folder(folder: Path) -> tuple[list[PlannedMove], Operation | None]:
+def organize_folder(
+    folder: Path,
+    progress_callback: Callable[[PlannedMove], None] | None = None,
+) -> tuple[list[PlannedMove], Operation | None]:
     planned = plan_organize(folder)
     if planned:
         ensure_history_available()
@@ -76,6 +80,8 @@ def organize_folder(folder: Path) -> tuple[list[PlannedMove], Operation | None]:
     for move in planned:
         move.destination.parent.mkdir(parents=True, exist_ok=True)
         shutil.move(move.source, move.destination)
+        if progress_callback is not None:
+            progress_callback(move)
         completed.append(
             MoveRecord(
                 original=str(move.source.resolve()),
@@ -87,7 +93,9 @@ def organize_folder(folder: Path) -> tuple[list[PlannedMove], Operation | None]:
     return planned, operation
 
 
-def undo_last_operation() -> tuple[Operation | None, list[MoveRecord]]:
+def undo_last_operation(
+    progress_callback: Callable[[MoveRecord, MoveRecord | None], None] | None = None,
+) -> tuple[Operation | None, list[MoveRecord]]:
     operation = pop_last_operation()
     if operation is None:
         return None, []
@@ -98,13 +106,16 @@ def undo_last_operation() -> tuple[Operation | None, list[MoveRecord]]:
         original = Path(move.original)
 
         if not organized.exists():
+            if progress_callback is not None:
+                progress_callback(move, None)
             continue
 
         original.parent.mkdir(parents=True, exist_ok=True)
         safe_original = unique_path(original)
         shutil.move(organized, safe_original)
-        restored.append(
-            MoveRecord(original=str(safe_original), organized=str(organized))
-        )
+        restored_move = MoveRecord(original=str(safe_original), organized=str(organized))
+        restored.append(restored_move)
+        if progress_callback is not None:
+            progress_callback(move, restored_move)
 
     return operation, restored
