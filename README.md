@@ -222,15 +222,6 @@ filepilot/
     test_rules.py
 ```
 
-## Future Improvements
-
-- Add recursive mode with explicit confirmation
-- Add custom category rules from a user config file
-- Add richer undo history browsing
-- Add integration tests for full CLI workflows
-- Add a `restore --operation-id` command for older operations
-- Add packaging and release automation
-
 ## License
 
 MIT
